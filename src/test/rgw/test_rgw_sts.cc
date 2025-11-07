@@ -17,6 +17,22 @@
 #include "common/ceph_json.h"
 #include "jwt-cpp/jwt.h"
 #include "rgw/rgw_rest_sts_detail.h"
+#include "common/dout.h"
+#include "global/global_context.h"
+#include "common/ceph_context.h"
+#include "msg/msg_types.h"
+
+// Minimal test prefix provider for logging
+static ceph::common::CephContext test_cct(CEPH_ENTITY_TYPE_CLIENT);
+
+struct TestDPP : public DoutPrefixProvider {
+  std::ostream& gen_prefix(std::ostream& out) const override {
+    return out << "[unittest_rgw_sts] ";
+  }
+  CephContext* get_cct() const override { return &test_cct; }
+  unsigned get_subsys() const override { return ceph_subsys_rgw; }
+};
+static TestDPP test_dpp; // single instance
 
 using namespace std;
 using namespace rgw::auth::sts;
@@ -86,21 +102,36 @@ static string pem_to_x5c_b64(const string& pem_cert) {
   string pw;
   unique_ptr<X509, decltype(&X509_free)> x509(PEM_read_bio_X509(certbio.get(), nullptr, nullptr, const_cast<char*>(pw.c_str())), X509_free);
 
+  if (!x509) return {};
+
   int len = i2d_X509(x509.get(), nullptr);
   if (len <= 0) return {};
   vector<unsigned char> der(len);
   unsigned char* p = der.data();
   i2d_X509(x509.get(), &p);
 
-  // base64 encode
-  unique_ptr<BIO, decltype(&BIO_free_all)> b64(BIO_new(BIO_f_base64()), BIO_free_all);
-  BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
-  unique_ptr<BIO, decltype(&BIO_free_all)> mem(BIO_new(BIO_s_mem()), BIO_free_all);
-  BIO_push(b64.get(), mem.get());
-  BIO_write(b64.get(), der.data(), der.size());
-  BIO_flush(b64.get());
-  char* out = nullptr; long outlen = BIO_get_mem_data(mem.get(), &out);
-  return string(out, outlen);
+  // base64 encode without leaking or double-freeing the BIO chain
+  BIO* mem = BIO_new(BIO_s_mem());
+  if (!mem) return {};
+  BIO* b64 = BIO_new(BIO_f_base64());
+  if (!b64) {
+    BIO_free(mem);
+    return {};
+  }
+  BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+  b64 = BIO_push(b64, mem); // b64 now owns mem; free with BIO_free_all(b64)
+  if (BIO_write(b64, der.data(), der.size()) <= 0) {
+    BIO_free_all(b64);
+    return {};
+  }
+  if (BIO_flush(b64) != 1) {
+    BIO_free_all(b64);
+    return {};
+  }
+  char* out = nullptr; long outlen = BIO_get_mem_data(mem, &out);
+  string out_str(out, outlen);
+  BIO_free_all(b64);
+  return out_str;
 }
 
 // Build a JWKS JSON string with two keys: first x5c wrong, second x5c right
@@ -152,12 +183,12 @@ TEST(RGW_STS_Unit, BuildJWKSWrongThenRight) {
   // Parse first key object
   JSONParser k1; ASSERT_TRUE(k1.parse(keys[0].c_str(), keys[0].size()));
   std::vector<std::string> x5c_first; ASSERT_TRUE(JSONDecoder::decode_json("x5c", x5c_first, &k1));
-  auto sel_first = rgw::auth::sts::detail::select_cert_from_x5c(nullptr, thumbprints, x5c_first, false);
+  auto sel_first = rgw::auth::sts::detail::select_cert_from_x5c(&test_dpp, thumbprints, x5c_first, false);
   ASSERT_FALSE(sel_first.has_value()); // first cert not selected
 
   JSONParser k2; ASSERT_TRUE(k2.parse(keys[1].c_str(), keys[1].size()));
   std::vector<std::string> x5c_second; ASSERT_TRUE(JSONDecoder::decode_json("x5c", x5c_second, &k2));
-  auto sel_second = rgw::auth::sts::detail::select_cert_from_x5c(nullptr, thumbprints, x5c_second, false);
+  auto sel_second = rgw::auth::sts::detail::select_cert_from_x5c(&test_dpp, thumbprints, x5c_second, false);
   ASSERT_TRUE(sel_second.has_value()); // second cert selected
 }
 
@@ -177,17 +208,14 @@ TEST(RGW_STS_Unit, VerifyWithCertSucceedsWithMatchingCert) {
       .set_type("JWT")
       .set_algorithm("RS256")
       .set_subject("subj")
-      .sign(jwt::algorithm::rs256(priv_right, cert_right, "", ""));
+      .sign(jwt::algorithm::rs256(cert_right, priv_right, "", ""));
 
   auto decoded = jwt::decode(token);
   ASSERT_EQ(decoded.get_algorithm(), std::string("RS256"));
 
   std::vector<std::string> thumbprints{right_thumb};
   // Wrong cert should fail
-  ASSERT_FALSE(rgw::auth::sts::detail::verify_with_cert(nullptr, decoded, "RS256", cert_wrong));
+  ASSERT_FALSE(rgw::auth::sts::detail::verify_with_cert(&test_dpp, decoded, "RS256", cert_wrong));
   // Right cert should succeed
-  ASSERT_TRUE(rgw::auth::sts::detail::verify_with_cert(nullptr, decoded, "RS256", cert_right));
+  ASSERT_TRUE(rgw::auth::sts::detail::verify_with_cert(&test_dpp, decoded, "RS256", cert_right));
 }
-
-// NOTE: Further tests will be added after extracting pure helpers to select candidates
-// and verify tokens without relying on network or full engine wiring.

@@ -6,8 +6,11 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <sstream>
+#include <iomanip>
 
 #include <boost/optional.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 
 #include <openssl/x509.h>
 #include <openssl/pem.h>
