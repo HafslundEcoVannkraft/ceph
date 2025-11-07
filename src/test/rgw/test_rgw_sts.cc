@@ -16,6 +16,7 @@
 #include "rgw/rgw_rest.h"
 #include "common/ceph_json.h"
 #include "jwt-cpp/jwt.h"
+#include "rgw/rgw_rest_sts_detail.h"
 
 using namespace std;
 using namespace rgw::auth::sts;
@@ -120,6 +121,10 @@ TEST(RGW_STS_Unit, ThumbprintAndX5CHelpersWork) {
   auto x5c = pem_to_x5c_b64(cert_pem);
   ASSERT_FALSE(x5c.empty());
 
+  std::vector<std::string> tps{thumb};
+  // Should match using detail helper
+  ASSERT_TRUE(rgw::auth::sts::detail::compute_thumbprint_match(tps, cert_pem));
+
   // sanity: x5c-based cert can be reconstructed by production code path later
 }
 
@@ -140,6 +145,48 @@ TEST(RGW_STS_Unit, BuildJWKSWrongThenRight) {
   ASSERT_TRUE(val != nullptr && val->is_array());
   auto keys = val->get_array_elements();
   ASSERT_EQ(keys.size(), 2u);
+
+  // Characterize current selection behavior: first non-matching x5c prevents selecting second
+  // We simulate skip_thumbprint_verification=false to require match.
+  std::vector<std::string> thumbprints{right_thumb};
+  // Parse first key object
+  JSONParser k1; ASSERT_TRUE(k1.parse(keys[0].c_str(), keys[0].size()));
+  std::vector<std::string> x5c_first; ASSERT_TRUE(JSONDecoder::decode_json("x5c", x5c_first, &k1));
+  auto sel_first = rgw::auth::sts::detail::select_cert_from_x5c(nullptr, thumbprints, x5c_first, false);
+  ASSERT_FALSE(sel_first.has_value()); // first cert not selected
+
+  JSONParser k2; ASSERT_TRUE(k2.parse(keys[1].c_str(), keys[1].size()));
+  std::vector<std::string> x5c_second; ASSERT_TRUE(JSONDecoder::decode_json("x5c", x5c_second, &k2));
+  auto sel_second = rgw::auth::sts::detail::select_cert_from_x5c(nullptr, thumbprints, x5c_second, false);
+  ASSERT_TRUE(sel_second.has_value()); // second cert selected
+}
+
+// Build and sign a JWT with RS256 using the right key, ensure verify_with_cert succeeds only with selected cert
+TEST(RGW_STS_Unit, VerifyWithCertSucceedsWithMatchingCert) {
+  auto [priv_right, cert_right] = generate_rsa_key_and_self_signed_cert_pem();
+  auto [priv_wrong, cert_wrong] = generate_rsa_key_and_self_signed_cert_pem();
+  auto right_thumb = sha1_thumbprint_from_pem(cert_right);
+  auto wrong_x5c = pem_to_x5c_b64(cert_wrong);
+  auto right_x5c = pem_to_x5c_b64(cert_right);
+
+  // Create a JWT signed by the right private key
+  // Extract RSA key for jwt-cpp (PEM)
+  auto token = jwt::create()
+      .set_issuer("https://issuer.test")
+      .set_audience("aud")
+      .set_type("JWT")
+      .set_algorithm("RS256")
+      .set_subject("subj")
+      .sign(jwt::algorithm::rs256(priv_right, cert_right, "", ""));
+
+  auto decoded = jwt::decode(token);
+  ASSERT_EQ(decoded.get_algorithm(), std::string("RS256"));
+
+  std::vector<std::string> thumbprints{right_thumb};
+  // Wrong cert should fail
+  ASSERT_FALSE(rgw::auth::sts::detail::verify_with_cert(nullptr, decoded, "RS256", cert_wrong));
+  // Right cert should succeed
+  ASSERT_TRUE(rgw::auth::sts::detail::verify_with_cert(nullptr, decoded, "RS256", cert_right));
 }
 
 // NOTE: Further tests will be added after extracting pure helpers to select candidates

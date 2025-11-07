@@ -54,83 +54,7 @@ using namespace std;
 
 namespace rgw::auth::sts {
 
-namespace {
-// Select the first matching x5c certificate (order preserved), or none.
-// Behavior preserved: returns only the first cert that matches thumbprints
-// (or any cert if skip_thumbprint_verification is true).
-static boost::optional<std::string> select_cert_from_x5c(
-    const DoutPrefixProvider* dpp,
-    const WebTokenEngine& engine,
-    const std::vector<std::string>& thumbprints,
-    const std::vector<std::string>& x5c,
-    bool skip_thumbprint_verification)
-{
-  std::string cert;
-  for (const auto& it : x5c) {
-    cert = std::string("-----BEGIN CERTIFICATE-----\n") + it + "\n-----END CERTIFICATE-----";
-    ldpp_dout(dpp, 20) << "Certificate is: " << cert.c_str() << dendl;
-    if (skip_thumbprint_verification || engine.is_cert_valid(const_cast<std::vector<std::string>&>(thumbprints), cert)) {
-      return cert;
-    }
-  }
-  return boost::none;
-}
-
-// Verify a decoded JWT against a single PEM certificate for supported algorithms.
-// Returns true on successful verification, false otherwise (no throw).
-static bool verify_with_cert(
-    const DoutPrefixProvider* dpp,
-    const jwt::decoded_jwt& decoded,
-    const std::string& algorithm,
-    const std::string& cert)
-{
-  try {
-    if (algorithm == "RS256") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::rs256{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "RS384") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::rs384{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "RS512") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::rs512{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "ES256") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::es256{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "ES384") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::es384{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "ES512") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::es512{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "PS256") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::ps256{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "PS384") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::ps384{cert});
-      verifier.verify(decoded);
-      return true;
-    } else if (algorithm == "PS512") {
-      auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::ps512{cert});
-      verifier.verify(decoded);
-      return true;
-    } else {
-      ldpp_dout(dpp, 5) << "Unsupported algorithm: " << algorithm << dendl;
-    }
-  } catch (const std::exception& e) {
-    ldpp_dout(dpp, 10) << "Signature validation using x5c failed" << e.what() << dendl;
-    return false;
-  }
-  return false;
-}
-} // anonymous namespace
+#include "rgw_rest_sts_detail.h"
 
 bool
 WebTokenEngine::is_applicable(const std::string& token) const noexcept
@@ -729,12 +653,22 @@ WebTokenEngine::validate_signature(const DoutPrefixProvider* dpp, const jwt::dec
 
             if (JSONDecoder::decode_json("x5c", x5c, &k_parser)) {
               bool skip_thumbprint_verification = cct->_conf.get_val<bool>("rgw_enable_jwks_url_verification");
-              auto selected = select_cert_from_x5c(dpp, *this, const_cast<std::vector<std::string>&>(thumbprints), x5c, skip_thumbprint_verification);
+              auto selected = detail::select_cert_from_x5c(dpp, thumbprints, x5c, skip_thumbprint_verification);
               if (!selected) {
                 ldpp_dout(dpp, 10) << "Cert doesn't match that with the thumbprints registered with oidc provider" << dendl;
+                ldpp_dout(dpp, 20) << "x5c entries count: " << x5c.size() << dendl;
+                ldpp_dout(dpp, 20) << "checked against OIDC issuer: " << iss << dendl;
+                if (!thumbprints.empty()) {
+                  std::stringstream tps;
+                  for (size_t i = 0; i < thumbprints.size(); ++i) {
+                    if (i) tps << ",";
+                    tps << thumbprints[i];
+                  }
+                  ldpp_dout(dpp, 20) << "thumbprints: [" << tps.str() << "]" << dendl;
+                }
                 continue;
               }
-              if (verify_with_cert(dpp, decoded, algorithm, *selected)) {
+              if (detail::verify_with_cert(dpp, decoded, algorithm, *selected)) {
                 return; // success
               }
             } else {
