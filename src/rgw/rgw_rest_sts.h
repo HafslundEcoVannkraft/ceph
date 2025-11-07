@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <string>
+#include <set>
+#include <unordered_map>
+
 #include "rgw_auth.h"
 #include "rgw_auth_filters.h"
 #include "rgw_rest.h"
@@ -28,7 +32,7 @@ class WebTokenEngine : public rgw::auth::Engine {
 
   using result_t = rgw::auth::Engine::result_t;
   using Pair = std::pair<std::string, std::string>;
-  using token_t = std::unordered_multimap<string, string>;
+  using token_t = std::unordered_multimap<std::string, std::string>;
   using principal_tags_t = std::set<Pair>;
 
   const rgw::auth::TokenExtractor* const extractor;
@@ -46,7 +50,7 @@ class WebTokenEngine : public rgw::auth::Engine {
 
   std::string get_role_tenant(const std::string& role_arn) const;
 
-  std::string get_role_name(const string& role_arn) const;
+  std::string get_role_name(const std::string& role_arn) const;
 
   std::string get_cert_url(const std::string& iss, const DoutPrefixProvider *dpp,optional_yield y) const;
 
@@ -62,7 +66,7 @@ class WebTokenEngine : public rgw::auth::Engine {
                         const req_state* s, optional_yield y) const;
 
   template <typename T>
-  void recurse_and_insert(const string& key, const jwt::claim& c, T& t) const;
+  void recurse_and_insert(const std::string& key, const jwt::claim& c, T& t) const;
   WebTokenEngine::token_t get_token_claims(const jwt::decoded_jwt& decoded) const;
 
   int create_connection(const DoutPrefixProvider* dpp, const std::string& hostname, int port) const;
