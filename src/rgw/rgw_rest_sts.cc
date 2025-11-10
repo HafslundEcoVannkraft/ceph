@@ -46,7 +46,7 @@
 #include "rgw_rest_oidc_provider.h"
 #include "rgw_asio_thread.h"
 
-#include "rgw_rest_sts_detail.h" // internal helper detail (must be before namespace)
+#include "rgw_rest_sts_detail.h"
 
 
 #define dout_context g_ceph_context
@@ -66,7 +66,7 @@ std::string
 WebTokenEngine::get_role_tenant(const string& role_arn) const
 {
   string tenant;
-  auto r_arn = ::rgw::ARN::parse(role_arn);
+  auto r_arn = rgw::ARN::parse(role_arn);
   if (r_arn) {
     tenant = r_arn->account;
   }
@@ -77,7 +77,7 @@ std::string
 WebTokenEngine::get_role_name(const string& role_arn) const
 {
   string role_name;
-  auto r_arn = ::rgw::ARN::parse(role_arn);
+  auto r_arn = rgw::ARN::parse(role_arn);
   if (r_arn) {
     role_name = r_arn->resource;
   }
