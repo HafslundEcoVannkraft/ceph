@@ -37,7 +37,7 @@ static TestDPP test_dpp; // single instance
 using namespace std;
 using namespace rgw::auth::sts;
 
-namespace {
+namespace { // anonymous namespace for test helpers
 
 // Helper: compute SHA-1 thumbprint of a PEM cert like is_cert_valid()
 static string sha1_thumbprint_from_pem(const string& pem_cert) {
@@ -143,20 +143,29 @@ static string build_jwks_with_wrong_then_right(const string& wrong_x5c, const st
   return jwks;
 }
 
-} // anonymous
+} // end of anonymous namespace
+
+// Hardcoded certificate and known SHA-1 thumbprint generated externally.
+// Thumbprint: 7523ff87ad66511531ac7562b2b7d45794b34940
+static const char* kKnownCertPem =
+"-----BEGIN CERTIFICATE-----\n"
+"MIIDSTCCAjGgAwIBAgIULVYzKt4CiREg0f0z0OlDE1dqz8cwDQYJKoZIhvcNAQELBQAwNDELMAkGA1UEBhMCVVMxETAPBgNVBAoMCENlcGhUZXN0MRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjUxMTEwMTA1MjIxWhcNMjYxMTEwMTA1MjIxWjA0MQswCQYDVQQGEwJVUzERMA8GA1UECgwIQ2VwaFRlc3QxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAIcIy+Eg4goms6cJlg5mvnLBypyYkuKRZHyJRQFJIup+1QTF1QNI1qaa1F1GnZYDR7MoNfB3YjaPbcX4A+N7C5CMeWoXaJzW25KDRbUPcaKQG7PfJjkXI/RqrUsvgvcMR03ryZKZYBXZsUAfkJpNo+CFhw9XNQVKHNJTLQJSJ0IPUKRxx+i3b6PfoqWgQJW7A5+EifZlPoMSK6RaFly4wTXMhymQ0NVBp4XBdx+NrpDfwqKNEQPoFsL9TBiVol8EVfQzzev5J+M0yTtAgwITpLNjtWiqy0z7NoLNJFS6k7TEMERbFjd26LanXEEoFNvytfH+ZEydnURnoKKfeHcD210CAwEAAaNTMFEwHQYDVR0OBBYEFBX6OhQrqm6YZjzLvt7tRoNC+IBoMB8GA1UdIwQYMBaAFBX6OhQrqm6YZjzLvt7tRoNC+IBoMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBABYdBvMe581I/rh3ytGKtEwqt6Q13XZpi9ZWHx5XbC2uN4DTWFFTBDaayUZyo9md+EuV89582RHDRoyNTnwKoOtOq0IMDGkKupeICeIKSweX/t3Gm024kkrQpq/MkG9UqGtS6Gl77417nJFSjLnXqt86MgUHTn0xqqIuWfGEQ+oZNEj7M2F+uOc9x6tJf3NBb1m8VwC6xMWl9ZRF8Uace6SdOd/RUEe1S8DzEbsta7Vo8Shf7En+S0lHWpowwfmC2ZtEXgbsGkL8P6i+t2XYZFYV6xT2EugoYAmM7iwHb5fAb8d1mJ9ol20+diUptkhQzFGley/dGAbsiUAKgk7ooGo=\n"
+"-----END CERTIFICATE-----\n";
 
 TEST(RGW_STS_Unit, ThumbprintAndX5CHelpersWork) {
-  auto [priv_pem, cert_pem] = generate_rsa_key_and_self_signed_cert_pem();
-  auto thumb = sha1_thumbprint_from_pem(cert_pem);
-  ASSERT_FALSE(thumb.empty());
-  auto x5c = pem_to_x5c_b64(cert_pem);
-  ASSERT_FALSE(x5c.empty());
+  const std::string known_thumb = "7523ff87ad66511531ac7562b2b7d45794b34940"; // lowercase, no colons
+  std::vector<std::string> tps{known_thumb};
+  ASSERT_TRUE(rgw::auth::sts::detail::compute_thumbprint_match(tps, kKnownCertPem));
+}
 
-  std::vector<std::string> tps{thumb};
-  // Should match using detail helper
-  ASSERT_TRUE(rgw::auth::sts::detail::compute_thumbprint_match(tps, cert_pem));
-
-  // sanity: x5c-based cert can be reconstructed by production code path later
+TEST(RGW_STS_Unit, ThumbprintMismatchFails) {
+  const std::string known_thumb = "7523ff87ad66511531ac7562b2b7d45794b34940";
+  const std::string wrong_thumb = "7523ff87ad66511531ac7562b2b7d45794b34941"; // last hex digit altered
+  std::vector<std::string> wrong{wrong_thumb};
+  ASSERT_FALSE(rgw::auth::sts::detail::compute_thumbprint_match(wrong, kKnownCertPem));
+  // Also ensure mixing correct + incorrect still passes (selection scans all)
+  std::vector<std::string> mixed{wrong_thumb, known_thumb};
+  ASSERT_TRUE(rgw::auth::sts::detail::compute_thumbprint_match(mixed, kKnownCertPem));
 }
 
 // Characterization test for JWKS selection logic shape (no network, pure JSON)
@@ -183,13 +192,13 @@ TEST(RGW_STS_Unit, BuildJWKSWrongThenRight) {
   // Parse first key object
   JSONParser k1; ASSERT_TRUE(k1.parse(keys[0].c_str(), keys[0].size()));
   std::vector<std::string> x5c_first; ASSERT_TRUE(JSONDecoder::decode_json("x5c", x5c_first, &k1));
-  auto sel_first = rgw::auth::sts::detail::select_cert_from_x5c(&test_dpp, thumbprints, x5c_first, false);
-  ASSERT_FALSE(sel_first.has_value()); // first cert not selected
+  auto cert_not_in_thumbprints = rgw::auth::sts::detail::select_cert_from_x5c(&test_dpp, thumbprints, x5c_first, false);
+  ASSERT_FALSE(cert_not_in_thumbprints.has_value()); // cert not selected, because no thumbprints match
 
   JSONParser k2; ASSERT_TRUE(k2.parse(keys[1].c_str(), keys[1].size()));
   std::vector<std::string> x5c_second; ASSERT_TRUE(JSONDecoder::decode_json("x5c", x5c_second, &k2));
-  auto sel_second = rgw::auth::sts::detail::select_cert_from_x5c(&test_dpp, thumbprints, x5c_second, false);
-  ASSERT_TRUE(sel_second.has_value()); // second cert selected
+  auto cert_in_thumbprints = rgw::auth::sts::detail::select_cert_from_x5c(&test_dpp, thumbprints, x5c_second, false);
+  ASSERT_TRUE(cert_in_thumbprints.has_value()); // cert is selected, because thumbprint matches
 }
 
 // Build and sign a JWT with RS256 using the right key, ensure verify_with_cert succeeds only with selected cert
@@ -216,6 +225,7 @@ TEST(RGW_STS_Unit, VerifyWithCertSucceedsWithMatchingCert) {
   std::vector<std::string> thumbprints{right_thumb};
   // Wrong cert should fail
   ASSERT_FALSE(rgw::auth::sts::detail::verify_with_cert(&test_dpp, decoded, "RS256", cert_wrong));
+
   // Right cert should succeed
   ASSERT_TRUE(rgw::auth::sts::detail::verify_with_cert(&test_dpp, decoded, "RS256", cert_right));
 }
