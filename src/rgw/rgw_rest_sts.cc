@@ -46,6 +46,8 @@
 #include "rgw_rest_oidc_provider.h"
 #include "rgw_asio_thread.h"
 
+#include "rgw_rest_sts_detail.h"
+
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -650,83 +652,24 @@ WebTokenEngine::validate_signature(const DoutPrefixProvider* dpp, const jwt::dec
             }
 
             if (JSONDecoder::decode_json("x5c", x5c, &k_parser)) {
-              string cert;
-              bool found_valid_cert = false;
               bool skip_thumbprint_verification = cct->_conf.get_val<bool>("rgw_enable_jwks_url_verification");
-              for (auto& it : x5c) {
-                cert = "-----BEGIN CERTIFICATE-----\n" + it + "\n-----END CERTIFICATE-----";
-                ldpp_dout(dpp, 20) << "Certificate is: " << cert.c_str() << dendl;
-                if (skip_thumbprint_verification || is_cert_valid(thumbprints, cert)) {
-                  found_valid_cert = true;
-                  break;
+              auto selected = detail::select_cert_from_x5c(dpp, thumbprints, x5c, skip_thumbprint_verification);
+              if (!selected) {
+                ldpp_dout(dpp, 10) << "Cert doesn't match that with the thumbprints registered with oidc provider" << dendl;
+                ldpp_dout(dpp, 20) << "x5c entries count: " << x5c.size() << dendl;
+                ldpp_dout(dpp, 20) << "checked against OIDC issuer: " << iss << dendl;
+                if (!thumbprints.empty()) {
+                  std::stringstream tps;
+                  for (size_t i = 0; i < thumbprints.size(); ++i) {
+                    if (i) tps << ",";
+                    tps << thumbprints[i];
+                  }
+                  ldpp_dout(dpp, 20) << "thumbprints: [" << tps.str() << "]" << dendl;
                 }
-              }
-              if (!found_valid_cert) {
-                ldpp_dout(dpp, 10) << "Cert doesn't match that with the thumbprints registered with oidc provider: " << cert.c_str() << dendl;
                 continue;
               }
-              try {
-                //verify method takes care of expired tokens also
-                if (algorithm == "RS256") {
-                  auto verifier = jwt::verify()
-                              .allow_algorithm(jwt::algorithm::rs256{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "RS384") {
-                  auto verifier = jwt::verify()
-                              .allow_algorithm(jwt::algorithm::rs384{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "RS512") {
-                  auto verifier = jwt::verify()
-                              .allow_algorithm(jwt::algorithm::rs512{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "ES256") {
-                  auto verifier = jwt::verify()
-                              .allow_algorithm(jwt::algorithm::es256{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "ES384") {
-                  auto verifier = jwt::verify()
-                              .allow_algorithm(jwt::algorithm::es384{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "ES512") {
-                  auto verifier = jwt::verify()
-                                .allow_algorithm(jwt::algorithm::es512{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "PS256") {
-                  auto verifier = jwt::verify()
-                                .allow_algorithm(jwt::algorithm::ps256{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "PS384") {
-                  auto verifier = jwt::verify()
-                                .allow_algorithm(jwt::algorithm::ps384{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else if (algorithm == "PS512") {
-                  auto verifier = jwt::verify()
-                                .allow_algorithm(jwt::algorithm::ps512{cert});
-
-                  verifier.verify(decoded);
-                  return;
-                } else {
-                  ldpp_dout(dpp, 5) << "Unsupported algorithm: " << algorithm << dendl;
-                }
-              }
-              catch (const std::exception& e) {
-                ldpp_dout(dpp, 10) << "Signature validation using x5c failed" << e.what() << dendl;
+              if (detail::verify_with_cert(dpp, decoded, algorithm, *selected)) {
+                return; // success
               }
             } else {
               // Try bare key validation
